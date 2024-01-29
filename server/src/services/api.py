@@ -1,11 +1,14 @@
 from pathlib import Path
 from threading import Thread
-import os, zipfile
-from flask import (Flask, jsonify, redirect, request, send_file,
-                   send_from_directory)
+import os
+import zipfile
+import shutil
+import re
+from flask import Flask, jsonify, send_from_directory, request
 from werkzeug.serving import make_server
 import boto3
 from src.context import AppContext, Participant, Session
+
 
 class ServerAPI(Thread):
     
@@ -241,11 +244,118 @@ class ServerAPI(Thread):
             logs = [name for name in os.listdir(folder_path) if os.path.isdir(os.path.join(folder_path, name))]
 
             return jsonify(logs=logs)
-        
+        #Borra todos los logs
+        @self.app.route('/api/deleteAllLogs')
+        def delete_all_logs():
+            session_log_path = "./session_log"
+            zips_path = os.path.join(session_log_path, "zips")
+
+            try:
+                # Eliminar archivos dentro de ./session_log
+                for filename in os.listdir(session_log_path):
+                    file_path = os.path.join(session_log_path, filename)
+                    if os.path.isfile(file_path) and filename != "AllLogs.zip":
+                        os.unlink(file_path)
+
+                # Eliminar carpetas dentro de ./session_log, excepto "zips"
+                for folder_name in os.listdir(session_log_path):
+                    folder_path = os.path.join(session_log_path, folder_name)
+                    if os.path.isdir(folder_path) and folder_name != "zips":
+                        shutil.rmtree(folder_path)
+
+                # Eliminar archivos dentro de ./session_log/zips, excepto "AllLogs.zip"
+                for filename in os.listdir(zips_path):
+                    file_path = os.path.join(zips_path, filename)
+                    if os.path.isfile(file_path) and filename != "AllLogs.zip":
+                        os.unlink(file_path)
+
+            except Exception:
+                return "Error deleting logs", 500
+            return jsonify({"status": "ok"})
+        # Descarga todas las trayectorias
+        @self.app.route('/api/downloadAllTrajectories')
+        def download_all_trajectories():
+            zip_filepath = generate_all_trajectories_zip()
+
+            if zip_filepath and os.path.isfile(zip_filepath):
+                return send_from_directory(os.path.abspath(os.path.dirname(zip_filepath)), os.path.basename(zip_filepath), as_attachment=True)
+            else:
+                return "Error al generar el archivo ZIP", 500
+        def generate_all_trajectories_zip():
+            try:
+                zip_filename = "AllTrajectories.zip"
+                folder_path = "./trajectories"
+                zip_path = os.path.join(folder_path, zip_filename)  # Ruta completa del archivo ZIP
+
+                # Eliminar el archivo ZIP si ya existe
+                if os.path.isfile(zip_path):
+                    os.remove(zip_path)
+
+                with zipfile.ZipFile(zip_path, "w") as zipf:
+                    for root, _, files in os.walk(folder_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            # Verificar si el archivo que se va a agregar es el propio archivo ZIP
+                            if file_path != zip_path:
+                                zipf.write(file_path, os.path.relpath(file_path, folder_path))
+
+                return zip_path
+            except Exception as e:
+                print(f"Error al generar el archivo ZIP: {str(e)}")
+                return None
+        # Borra todas las trayectorias
+        @self.app.route('/api/deleteAllTrajectories')
+        def delete_all_trajectories():
+            folder_path = "./trajectories"
+            session_path = "./session_log"
+            zip_path = "./session_log/zips"
+
+            try:
+                # Verificar si la carpeta existe
+                if os.path.exists(folder_path):
+                    # Eliminar todo el contenido de la carpeta
+                    for filename in os.listdir(folder_path):
+                        file_path = os.path.join(folder_path, filename)
+                        try:
+                            if os.path.isfile(file_path) and filename.endswith(".txt"):
+                                # Extraer la fecha del nombre del archivo usando una expresión regular
+                                match = re.search(r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})", filename)
+                                if match:
+                                    date_string = match.group(1)
+
+                                    # Construir el nombre de la carpeta basado en la fecha
+                                    subfolder_name = os.path.join(session_path, date_string)
+
+                                    # Verificar si la carpeta existe y eliminarla
+                                    if os.path.exists(subfolder_name):
+                                        shutil.rmtree(subfolder_name)
+                                    else:
+                                        print(f"La carpeta {subfolder_name} no existe.")
+                                    # Eliminar archivos .zip de la tercera carpeta
+                                    if os.path.exists(zip_path):
+                                        for zip_filename in os.listdir(zip_path):
+                                            zip_file_path = os.path.join(zip_path, zip_filename)
+                                            try:
+                                                if os.path.isfile(zip_file_path) and zip_filename == date_string + ".zip":
+                                                    os.unlink(zip_file_path)
+                                            except Exception as e:
+                                                print(f"No se pudo borrar {zip_file_path}: {e}")
+                                    else:
+                                        print("La tercera carpeta no existe.")
+                                os.unlink(file_path)
+                        except Exception as e:
+                            print(f"No se pudo borrar {file_path}: {e}")
+                else:
+                    print("La carpeta no existe.")
+
+            except Exception as e:
+                return "Error deleting trajectories", 500
+            return jsonify({"status": "ok"})
+
+
         self.server = make_server(host, port, self.app, threaded=True)
         self.ctx = self.app.app_context()
         self.ctx.push()
-        
     def run(self):
         self.server.serve_forever()
 
